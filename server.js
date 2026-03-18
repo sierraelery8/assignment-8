@@ -52,6 +52,10 @@ app.get('/api/projects/:id', async (req, res) => {
 app.post('/api/projects', async (req, res) => {
     try {
         const { name, description, status, dueDate } = req.body;
+
+        if (!name || !description || !status || !dueDate) {
+            return res.status(400).json({ error: "All fields are required" });
+        }
         
         const newProject = await Project.create({
             name,
