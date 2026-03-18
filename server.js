@@ -1,12 +1,21 @@
 const express = require('express');
-const bcrypt = require('bcrypt'); // bcrypt for password hashing
-const { db, User, Project, Task } = require('./database/setup'); // include User
+const bcrypt = require('bcrypt');
+const session = require('express-session'); // 
+const { db, User, Project, Task } = require('./database/setup');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(express.json());
+
+// Session middleware (after json middleware)
+app.use(session({
+    secret: process.env.SESSION_SECRET || 'supersecret', // should be stored in .env
+    resave: false,
+    saveUninitialized: false,
+    cookie: { secure: false } // set true if using https
+}));
 
 // Test database connection
 async function testConnection() {
@@ -20,33 +29,32 @@ async function testConnection() {
 testConnection();
 
 
+// AUTHENTICATION MIDDLEWARE
+
+function isAuthenticated(req, res, next) {
+    if (req.session.userId) {
+        req.user = { id: req.session.userId, email: req.session.userEmail };
+        return next();
+    }
+    return res.status(401).json({ error: 'Unauthorized. Please log in.' });
+}
+
+
 // USER REGISTRATION
 
 app.post('/api/register', async (req, res) => {
     try {
         const { username, email, password } = req.body;
-
-        // Validate required fields
         if (!username || !email || !password) {
             return res.status(400).json({ error: "Username, email, and password are required." });
         }
 
-        // Check if user with this email already exists
         const existingUser = await User.findOne({ where: { email } });
-        if (existingUser) {
-            return res.status(400).json({ error: "Email already in use." });
-        }
+        if (existingUser) return res.status(400).json({ error: "Email already in use." });
 
-        // Hash the password
-        const saltRounds = 10;
-        const hashedPassword = await bcrypt.hash(password, saltRounds);
+        const hashedPassword = await bcrypt.hash(password, 10);
 
-        // Create the new user
-        const newUser = await User.create({
-            username,
-            email,
-            password: hashedPassword
-        });
+        const newUser = await User.create({ username, email, password: hashedPassword });
 
         res.status(201).json({ message: "User registered successfully.", userId: newUser.id });
     } catch (error) {
@@ -55,12 +63,52 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
-// PROJECT ROUTES
 
-// GET /api/projects - Get all projects
-app.get('/api/projects', async (req, res) => {
+// USER LOGIN
+
+app.post('/api/login', async (req, res) => {
     try {
-        const projects = await Project.findAll();
+        const { email, password } = req.body;
+        if (!email || !password) return res.status(400).json({ error: "Email and password are required." });
+
+        const user = await User.findOne({ where: { email } });
+        if (!user) return res.status(401).json({ error: "Invalid email or password." });
+
+        const passwordMatch = await bcrypt.compare(password, user.password);
+        if (!passwordMatch) return res.status(401).json({ error: "Invalid email or password." });
+
+        // Create session
+        req.session.userId = user.id;
+        req.session.userEmail = user.email;
+
+        res.json({ message: "Login successful." });
+    } catch (error) {
+        console.error('Error logging in:', error);
+        res.status(500).json({ error: 'Failed to log in.' });
+    }
+});
+
+
+// USER LOGOUT
+
+app.post('/api/logout', (req, res) => {
+    req.session.destroy(err => {
+        if (err) {
+            console.error('Error logging out:', err);
+            return res.status(500).json({ error: 'Failed to log out.' });
+        }
+        res.json({ message: 'Logout successful.' });
+    });
+});
+
+
+// PROTECTED PROJECT ROUTES
+
+
+// GET /api/projects - Get all projects (only authenticated users)
+app.get('/api/projects', isAuthenticated, async (req, res) => {
+    try {
+        const projects = await Project.findAll({ where: { userId: req.user.id } });
         res.json(projects);
     } catch (error) {
         console.error('Error fetching projects:', error);
@@ -68,65 +116,10 @@ app.get('/api/projects', async (req, res) => {
     }
 });
 
-// GET /api/projects/:id - Get project by ID
-app.get('/api/projects/:id', async (req, res) => {
-    try {
-        const project = await Project.findByPk(req.params.id);
-        if (!project) return res.status(404).json({ error: 'Project not found' });
-        res.json(project);
-    } catch (error) {
-        console.error('Error fetching project:', error);
-        res.status(500).json({ error: 'Failed to fetch project' });
-    }
-});
-
-// POST /api/projects - Create new project
-app.post('/api/projects', async (req, res) => {
-    try {
-        const { name, description, status, dueDate } = req.body;
-        if (!name || !description || !status || !dueDate) {
-            return res.status(400).json({ error: "All fields are required" });
-        }
-        const newProject = await Project.create({ name, description, status, dueDate });
-        res.status(201).json(newProject);
-    } catch (error) {
-        console.error('Error creating project:', error);
-        res.status(500).json({ error: 'Failed to create project' });
-    }
-});
-
-// PUT /api/projects/:id - Update existing project
-app.put('/api/projects/:id', async (req, res) => {
-    try {
-        const { name, description, status, dueDate } = req.body;
-        const [updatedRowsCount] = await Project.update(
-            { name, description, status, dueDate },
-            { where: { id: req.params.id } }
-        );
-        if (updatedRowsCount === 0) return res.status(404).json({ error: 'Project not found' });
-        const updatedProject = await Project.findByPk(req.params.id);
-        res.json(updatedProject);
-    } catch (error) {
-        console.error('Error updating project:', error);
-        res.status(500).json({ error: 'Failed to update project' });
-    }
-});
-
-// DELETE /api/projects/:id - Delete project
-app.delete('/api/projects/:id', async (req, res) => {
-    try {
-        const deletedRowsCount = await Project.destroy({ where: { id: req.params.id } });
-        if (deletedRowsCount === 0) return res.status(404).json({ error: 'Project not found' });
-        res.json({ message: 'Project deleted successfully' });
-    } catch (error) {
-        console.error('Error deleting project:', error);
-        res.status(500).json({ error: 'Failed to delete project' });
-    }
-});
 
 // TASK ROUTES
 
-// GET /api/tasks - Get all tasks
+// GET /api/tasks - Get all tasks (public for now)
 app.get('/api/tasks', async (req, res) => {
     try {
         const tasks = await Task.findAll();
@@ -137,60 +130,8 @@ app.get('/api/tasks', async (req, res) => {
     }
 });
 
-// GET /api/tasks/:id - Get task by ID
-app.get('/api/tasks/:id', async (req, res) => {
-    try {
-        const task = await Task.findByPk(req.params.id);
-        if (!task) return res.status(404).json({ error: 'Task not found' });
-        res.json(task);
-    } catch (error) {
-        console.error('Error fetching task:', error);
-        res.status(500).json({ error: 'Failed to fetch task' });
-    }
-});
+// START SERVER
 
-// POST /api/tasks - Create new task
-app.post('/api/tasks', async (req, res) => {
-    try {
-        const { title, description, completed, priority, dueDate, projectId } = req.body;
-        const newTask = await Task.create({ title, description, completed, priority, dueDate, projectId });
-        res.status(201).json(newTask);
-    } catch (error) {
-        console.error('Error creating task:', error);
-        res.status(500).json({ error: 'Failed to create task' });
-    }
-});
-
-// PUT /api/tasks/:id - Update existing task
-app.put('/api/tasks/:id', async (req, res) => {
-    try {
-        const { title, description, completed, priority, dueDate, projectId } = req.body;
-        const [updatedRowsCount] = await Task.update(
-            { title, description, completed, priority, dueDate, projectId },
-            { where: { id: req.params.id } }
-        );
-        if (updatedRowsCount === 0) return res.status(404).json({ error: 'Task not found' });
-        const updatedTask = await Task.findByPk(req.params.id);
-        res.json(updatedTask);
-    } catch (error) {
-        console.error('Error updating task:', error);
-        res.status(500).json({ error: 'Failed to update task' });
-    }
-});
-
-// DELETE /api/tasks/:id - Delete task
-app.delete('/api/tasks/:id', async (req, res) => {
-    try {
-        const deletedRowsCount = await Task.destroy({ where: { id: req.params.id } });
-        if (deletedRowsCount === 0) return res.status(404).json({ error: 'Task not found' });
-        res.json({ message: 'Task deleted successfully' });
-    } catch (error) {
-        console.error('Error deleting task:', error);
-        res.status(500).json({ error: 'Failed to delete task' });
-    }
-});
-
-// Start server
 app.listen(PORT, () => {
-    console.log(`Server running on port http://localhost:${PORT}`);
+    console.log(`Server running on http://localhost:${PORT}`);
 });
